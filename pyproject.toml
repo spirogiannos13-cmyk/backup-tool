@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backup-tool"
+version = "0.1.0"
+description = "Desktop MSSQL backup manager with multi-cloud uploads through rclone."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+  { name = "Spyridon Kranis" }
+]
+dependencies = [
+  "PySide6>=6.8",
+  "pyodbc>=5.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.7"
+]
+
+[project.scripts]
+backup-tool = "backup_tool.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
