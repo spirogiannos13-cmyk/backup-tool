@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from backup_tool.cloud.rclone import RcloneDestination, copy_file_to_remote
+from backup_tool.cloud.rclone import (
+    RcloneDestination,
+    copy_file_to_remote,
+    verify_file_on_remote,
+)
 from backup_tool.mssql.backup import SqlServerConnection, execute_backup
 from backup_tool.storage.database import AppDatabase
 
@@ -59,8 +63,17 @@ class BackupService:
                 checksum=request.checksum,
             )
 
+            if not backup_path.is_file():
+                raise FileNotFoundError(
+                    f"SQL Server backup completed but the backup file was not found: {backup_path}"
+                )
+
             if request.cloud_destination:
                 copy_file_to_remote(
+                    source_file=backup_path,
+                    destination=request.cloud_destination,
+                )
+                verify_file_on_remote(
                     source_file=backup_path,
                     destination=request.cloud_destination,
                 )
@@ -68,7 +81,7 @@ class BackupService:
             self.database.finish_backup_run(
                 run_id,
                 status="success",
-                bytes_written=backup_path.stat().st_size if backup_path.exists() else None,
+                bytes_written=backup_path.stat().st_size,
             )
         except Exception as exc:
             self.database.finish_backup_run(run_id, status="failed", error_message=str(exc))
