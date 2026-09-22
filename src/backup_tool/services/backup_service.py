@@ -19,6 +19,7 @@ class BackupRequest:
     database_name: str
     backup_type: str
     local_folder: Path
+    job_id: int | None = None
     cloud_destination: RcloneDestination | None = None
     compression: bool = True
     checksum: bool = True
@@ -44,7 +45,7 @@ class BackupService:
             request.backup_type,
         )
         run_id = self.database.start_backup_run(
-            job_id=None,
+            job_id=request.job_id,
             database_name=request.database_name,
             backup_type=request.backup_type,
             local_path=str(backup_path),
