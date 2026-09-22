@@ -4,11 +4,14 @@ import sys
 from pathlib import Path
 from xmlrpc import server
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QFileDialog,
     QGridLayout,
@@ -29,6 +32,12 @@ from backup_tool.cloud.rclone import (
     RcloneDestination,
     find_rclone,
     list_remotes,
+)
+from backup_tool.cloud.rclone_config import (
+    RcloneConfigOption,
+    RcloneConfigResponse,
+    RcloneOAuthProcess,
+    start_remote_configuration,
 )
 from backup_tool.mssql.backup import SqlServerConnection
 from backup_tool.services.backup_service import BackupRequest, BackupService
@@ -1301,6 +1310,10 @@ class MainWindow(QMainWindow):
         status_row = QHBoxLayout()
         self.rclone_status = QLabel()
         self.rclone_status.setObjectName("statusLabel")
+        add_account_button = QPushButton("Add Cloud Account")
+        add_account_button.setObjectName("primaryButton")
+        add_account_button.clicked.connect(self._add_cloud_account)
+
         test_button = QPushButton("Test rclone")
         test_button.setObjectName("secondaryButton")
         test_button.clicked.connect(self._test_rclone)
@@ -1308,6 +1321,7 @@ class MainWindow(QMainWindow):
         refresh_button.setObjectName("secondaryButton")
         refresh_button.clicked.connect(self._refresh_cloud_page)
         status_row.addWidget(self.rclone_status, 1)
+        status_row.addWidget(add_account_button)
         status_row.addWidget(test_button)
         status_row.addWidget(refresh_button)
         layout.addLayout(status_row)
@@ -1358,6 +1372,294 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return container
 
+    def _add_cloud_account(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Cloud Account")
+        dialog.setMinimumWidth(520)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel("Add Cloud Account")
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Create a new rclone cloud account for backup uploads."
+        )
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        form = QFormLayout()
+
+        provider = QComboBox()
+        provider.addItem("Google Drive", "drive")
+        provider.addItem("OneDrive", "onedrive")
+        provider.addItem("Dropbox", "dropbox")
+        provider.addItem("Amazon S3", "s3")
+        provider.addItem("MEGA", "mega")
+
+        remote_name = QLineEdit()
+        remote_name.setPlaceholderText("e.g. my_google_drive")
+
+        form.addRow("Provider", provider)
+        form.addRow("Remote name", remote_name)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Cancel | QDialogButtonBox.Ok
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name = remote_name.text().strip()
+        backend_type = provider.currentData()
+
+        if not name:
+            QMessageBox.warning(
+                self,
+                "Add Cloud Account",
+                "Remote name is required.",
+            )
+            return
+
+        try:
+            response = start_remote_configuration(
+                remote_name=name,
+                backend_type=str(backend_type),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "rclone configuration error",
+                str(exc),
+            )
+            return
+
+        if response.error:
+            QMessageBox.critical(
+                self,
+                "rclone configuration error",
+                response.error,
+            )
+            return
+
+        self._show_rclone_config_question(
+            remote_name=name,
+            backend_type=str(backend_type),
+            response=response,
+        )
+
+    def _show_rclone_config_question(
+        self,
+        *,
+        remote_name: str,
+        backend_type: str,
+        response: RcloneConfigResponse,
+    ) -> None:
+        current_response = response
+
+        while current_response.state and current_response.option:
+            option = current_response.option
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("rclone Configuration")
+            dialog.setMinimumWidth(560)
+
+            layout = QVBoxLayout(dialog)
+
+            title = QLabel("Configure Cloud Account")
+            title.setObjectName("pageTitle")
+            layout.addWidget(title)
+
+            help_label = QLabel(option.help or option.name)
+            help_label.setWordWrap(True)
+            layout.addWidget(help_label)
+
+            form = QFormLayout()
+            answer = QLineEdit()
+
+            if option.default is not None:
+                answer.setText(str(option.default))
+
+            if option.is_password:
+                answer.setEchoMode(QLineEdit.EchoMode.Password)
+
+            form.addRow(option.name, answer)
+            layout.addLayout(form)
+
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.Cancel | QDialogButtonBox.Ok
+            )
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            answer_value = answer.text().strip()
+
+            if (
+                current_response.state.startswith("*")
+                and option.name == "config_is_local"
+                and answer_value.lower() in {"true", "yes", "y"}
+            ):
+                try:
+                    oauth = RcloneOAuthProcess(
+                        remote_name=remote_name,
+                        backend_type=backend_type,
+                    )
+
+                    process = oauth.start(
+                        state=current_response.state,
+                        result="true",
+                    )
+
+                    self._rclone_oauth_process = oauth
+
+                    self.sidebar_status.setText(
+                        "Waiting for cloud authorization..."
+                    )
+
+                    cancel_dialog = QDialog(self)
+                    cancel_dialog.setWindowTitle("Cloud Authorization")
+                    cancel_dialog.setModal(False)
+                    cancel_dialog.setMinimumWidth(420)
+
+                    cancel_layout = QVBoxLayout(cancel_dialog)
+
+                    cancel_label = QLabel(
+                        "Waiting for cloud authorization...\\n\\n"
+                        "Complete the authorization in your browser."
+                    )
+                    cancel_label.setWordWrap(True)
+                    cancel_layout.addWidget(cancel_label)
+
+                    cancel_button = QPushButton("Cancel Authorization")
+                    cancel_button.setObjectName("secondaryButton")
+                    cancel_layout.addWidget(cancel_button)
+
+                    oauth_cancelled = False
+
+                    def cancel_oauth() -> None:
+                        nonlocal oauth_cancelled
+
+                        oauth_cancelled = True
+                        cancel_button.setEnabled(False)
+                        cancel_label.setText(
+                            "Cancelling cloud authorization..."
+                        )
+
+                        if self._rclone_oauth_process is not None:
+                            self._rclone_oauth_process.stop()
+
+                        self.sidebar_status.setText(
+                            "Cancelling cloud authorization..."
+                        )
+
+                    cancel_button.clicked.connect(cancel_oauth)
+                    cancel_dialog.show()
+
+                    def check_oauth() -> None:
+                        if process.poll() is None:
+                            return
+
+                        self._rclone_oauth_timer.stop()
+
+                        try:
+                            stdout, stderr = process.communicate()
+                        except Exception as exc:
+                            self._rclone_oauth_process = None
+                            QMessageBox.critical(
+                                self,
+                                "rclone OAuth error",
+                                str(exc),
+                            )
+                            return
+
+                        self._rclone_oauth_process = None
+
+                        if oauth_cancelled:
+                            cancel_dialog.close()
+                            self.sidebar_status.setText(
+                                "Cloud authorization cancelled"
+                            )
+                            return
+
+                        if process.returncode != 0:
+                            cancel_dialog.close()
+                            message = stderr.strip() or stdout.strip()
+                            QMessageBox.critical(
+                                self,
+                                "rclone OAuth error",
+                                message or "rclone OAuth failed.",
+                            )
+                            self.sidebar_status.setText("Cloud authorization failed")
+                            return
+
+                        cancel_dialog.close()
+                        self.sidebar_status.setText(
+                            "Cloud authorization completed"
+                        )
+
+                        QMessageBox.information(
+                            self,
+                            "Cloud Account",
+                            f"rclone remote '{remote_name}' was configured successfully.",
+                        )
+
+                        self._refresh_cloud_page()
+
+                    self._rclone_oauth_timer = QTimer(self)
+                    self._rclone_oauth_timer.setInterval(250)
+                    self._rclone_oauth_timer.timeout.connect(check_oauth)
+                    self._rclone_oauth_timer.start()
+
+                except Exception as exc:
+                    QMessageBox.critical(
+                        self,
+                        "rclone OAuth error",
+                        str(exc),
+                    )
+
+                return
+
+            try:
+                from backup_tool.cloud.rclone_config import continue_remote_configuration
+
+                current_response = continue_remote_configuration(
+                    remote_name=remote_name,
+                    backend_type=backend_type,
+                    state=current_response.state,
+                    result=answer_value,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "rclone configuration error",
+                    str(exc),
+                )
+                return
+
+            if current_response.error:
+                QMessageBox.critical(
+                    self,
+                    "rclone configuration error",
+                    current_response.error,
+                )
+                return
+
+        if not current_response.state:
+            QMessageBox.information(
+                self,
+                "Cloud Account",
+                f"rclone remote '{remote_name}' was configured successfully.",
+            )
     def _refresh_cloud_page(self) -> None:
         if not hasattr(self, "cloud_remote"):
             return

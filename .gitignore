@@ -40,3 +40,5 @@ settings.local.toml
 .vscode/
 Thumbs.db
 Desktop.ini
+
+.pytest_tmp/
